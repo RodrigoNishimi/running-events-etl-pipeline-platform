@@ -24,6 +24,8 @@ Fontes  →  [EXTRACT]   →  Bronze/Raw   →  [TRANSFORM]  →  Silver        
 sql/001_schema.sql              DDL do banco (não exige PostGIS)
 sql/002_postgis.sql             upgrade geoespacial opcional (PostGIS)
 sql/003_dedup.sql               fila de revisão do entity resolution
+sql/004_alias.sql               aliases de merge (chave absorvida → sobrevivente)
+sql/005_geocode.sql             cache de geocoding (Nominatim)
 src/corridas_etl/
   config.py                     configuração via variáveis de ambiente
   models.py                     schema canônico (Pydantic)
@@ -71,6 +73,7 @@ python -m corridas_etl.pipeline.dedup --review                         # fila
 python -m corridas_etl.pipeline.dedup --resolve 3 merge                # decisão
 python -m corridas_etl.pipeline.enrich --step iguana-dates             # lacunas
 python -m corridas_etl.pipeline.enrich --step ticketsports-distances --limit 10
+python -m corridas_etl.pipeline.enrich --step geocode                  # lat/long
 python -m corridas_etl.pipeline.quality                                # saúde
 ```
 
@@ -114,11 +117,25 @@ sozinho; 0.70–0.88 vai para a fila `dedup_review` (CLI `--review`/`--resolve`)
 Caso real resolvido: "Run The Bridge 2026" + "Brooks Run The Bridge 2026" →
 um evento com 2 fontes.
 
+Calibração com dados reais (triagem de 39 pares em 2026-07-19):
+- ordinais de edição/anos/números romanos são removidos do nome só para o
+  score (a `canonical_key` não muda);
+- cidades conhecidas e diferentes aplicam penalidade multiplicativa — nomes
+  genéricos iguais em cidades vizinhas caem para "distinto", nomes quase
+  idênticos ainda chegam à revisão.
+
+Merges gravam um **alias** (`event_alias`): a chave do evento absorvido passa a
+rotear o upsert para o sobrevivente, então a recarga da fonte não recria o
+duplicado. O upsert usa COALESCE — fontes preenchem lacunas, nunca apagam dado
+enriquecido.
+
 ## Roadmap
 
 - **Fase 0 — feita:** schema canônico, upsert idempotente, raw storage, 1ª fonte.
 - **Fase 1 — feita:** 3 conectores reais, dedup com fila de revisão, enriquecimento.
-- **Fase 2 — parcial:** runner diário com isolamento de falhas + quality checks.
-  Falta: geocoding (lat/long), Meilisearch, conector Ativo.com, incremental por
-  hash (pular transform quando o payload bruto não mudou), dashboard de saúde.
+- **Fase 2 — parcial:** runner diário com isolamento de falhas, quality checks,
+  aliases de merge, geocoding via Nominatim (cache + rate limit 1 req/s).
+  Falta: Meilisearch, conector Ativo.com, incremental por hash (pular
+  transform quando o payload bruto não mudou), dashboard de saúde, suporte a
+  eventos internacionais (há corrida no Chile com "UF" inválida).
 - **Fase 3:** notificações de mudança (preço/status), parcerias com feed oficial.
