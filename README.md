@@ -99,6 +99,7 @@ número de fontes justificar.)
 | **Ticket Sports** | Agregador (centenas de organizadoras) | ~770 corridas ativas | Páginas públicas + JSON-LD `SportsEvent`; descoberta agentic (Playwright) no calendário. robots.txt proíbe `/api/` — respeitado. | ✅ `ticketsports` |
 | **Iguana Sports** | Organizadora grande (Nike SP City Marathon, Run The Bridge) | ~7 eventos premium | Shopify: `products.json` (catálogo) + `/products/<handle>.js` (detalhe c/ disponibilidade) | ✅ `iguanasports` |
 | **Yescom** | Organizadora grande (São Silvestre, Maratona de SP) | ~13 eventos grandes | HTML estático, microsite custom por evento; parse best-effort | ✅ `yescom` |
+| **Running Land** | Organizadora/plataforma (Blue Run, Eco Run, Bota Pra Correr) | ~116 eventos futuros | Magento headless: GraphQL público (`getEventCategoryFull` + mapa de atributos). robots.txt permite; WAF exige UA de browser. Distâncias estruturadas. | ✅ `runningland` |
 | **Ativo.com** | Agregador/portal | ~8 corridas futuras | `/eventos.json` (HTTP puro, sem Playwright). ⚠️ O dump é quase todo **arquivo histórico** (eventos desde 2015); filtramos para futuros. | ✅ `ativo` |
 | **Live!Run** | Organizadora | ? | não investigado | — |
 
@@ -119,12 +120,16 @@ sozinho; 0.70–0.88 vai para a fila `dedup_review` (CLI `--review`/`--resolve`)
 Caso real resolvido: "Run The Bridge 2026" + "Brooks Run The Bridge 2026" →
 um evento com 2 fontes.
 
-Calibração com dados reais (triagem de 39 pares em 2026-07-19):
+Calibração com dados reais (triagem de 62 pares em 2026-07-19):
 - ordinais de edição/anos/números romanos são removidos do nome só para o
-  score (a `canonical_key` não muda);
-- cidades conhecidas e diferentes aplicam penalidade multiplicativa — nomes
-  genéricos iguais em cidades vizinhas caem para "distinto", nomes quase
-  idênticos ainda chegam à revisão.
+  score (a `canonical_key` não muda); quando as cidades são iguais, os tokens
+  da cidade também saem (evita que "TECH RUN CURITIBA" × "Eco Run Curitiba"
+  pareçam iguais); quando diferem, ficam (distinguem "Meia de Jundiaí" de
+  "Meia de SBC") e aplicam penalidade multiplicativa;
+- **piso de nome** (0.70): nome é a âncora de identidade — abaixo disso é
+  distinto, mesmo com dia/cidade iguais; auto-merge exige nome ≥ 0.85;
+- blend 70/30 de token_set/token_sort (subconjunto = padrão de patrocinador;
+  os subconjuntos perigosos — kids, caminhada, circuitinho — têm guard).
 
 Merges gravam um **alias** (`event_alias`): a chave do evento absorvido passa a
 rotear o upsert para o sobrevivente, então a recarga da fonte não recria o
