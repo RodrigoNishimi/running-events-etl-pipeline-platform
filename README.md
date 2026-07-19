@@ -74,6 +74,8 @@ python -m corridas_etl.pipeline.dedup --resolve 3 merge                # decisã
 python -m corridas_etl.pipeline.enrich --step iguana-dates             # lacunas
 python -m corridas_etl.pipeline.enrich --step ticketsports-distances --limit 10
 python -m corridas_etl.pipeline.enrich --step geocode                  # lat/long
+python -m corridas_etl.serving.search                                  # reindexa busca
+python -m corridas_etl.serving.search --dry-run --future-only          # docs sem servidor
 python -m corridas_etl.pipeline.quality                                # saúde
 ```
 
@@ -97,7 +99,7 @@ número de fontes justificar.)
 | **Ticket Sports** | Agregador (centenas de organizadoras) | ~770 corridas ativas | Páginas públicas + JSON-LD `SportsEvent`; descoberta agentic (Playwright) no calendário. robots.txt proíbe `/api/` — respeitado. | ✅ `ticketsports` |
 | **Iguana Sports** | Organizadora grande (Nike SP City Marathon, Run The Bridge) | ~7 eventos premium | Shopify: `products.json` (catálogo) + `/products/<handle>.js` (detalhe c/ disponibilidade) | ✅ `iguanasports` |
 | **Yescom** | Organizadora grande (São Silvestre, Maratona de SP) | ~13 eventos grandes | HTML estático, microsite custom por evento; parse best-effort | ✅ `yescom` |
-| **Ativo.com** | Agregador/portal | ? | Calendário JS-rendered; exige Playwright | 🔜 planejado |
+| **Ativo.com** | Agregador/portal | ~8 corridas futuras | `/eventos.json` (HTTP puro, sem Playwright). ⚠️ O dump é quase todo **arquivo histórico** (eventos desde 2015); filtramos para futuros. | ✅ `ativo` |
 | **Live!Run** | Organizadora | ? | não investigado | — |
 
 Limitações conhecidas:
@@ -129,13 +131,40 @@ rotear o upsert para o sobrevivente, então a recarga da fonte não recria o
 duplicado. O upsert usa COALESCE — fontes preenchem lacunas, nunca apagam dado
 enriquecido.
 
+## Busca facetada (Meilisearch)
+
+A camada de serving indexa os eventos no Meilisearch (`serving/search.py`).
+O Postgres continua sendo a verdade; o índice é derivado e reconstruível.
+
+```bash
+docker compose up -d search           # sobe o Meilisearch (porta 7700)
+export MEILI_MASTER_KEY=dev_master_key
+python -m corridas_etl.serving.search --future-only
+```
+
+Facetas expostas ao app: `state`, `city`, `country`, `distances_km`, `month`,
+`year`, `registration_status`, `sources` e `_geo` (para "corridas perto de mim").
+Buscável por nome/cidade/organizadora. Exemplos (cliente `meilisearch`):
+
+```python
+idx.search("maratona", {"filter": ["state = SP", "distances_km = 42.195"],
+                        "sort": ["start_timestamp:asc"]})
+idx.search("", {"filter": ["_geoRadius(-23.55, -46.63, 50000)"],   # raio 50km
+               "sort": ["_geoPoint(-23.55,-46.63):asc"]})
+idx.search("", {"facets": ["state", "month_name"]})                 # distribuição
+```
+
+Verificado end-to-end contra os 796 eventos futuros: busca textual, filtros
+facetados, distribuição e geo-radius funcionando.
+
 ## Roadmap
 
 - **Fase 0 — feita:** schema canônico, upsert idempotente, raw storage, 1ª fonte.
 - **Fase 1 — feita:** 3 conectores reais, dedup com fila de revisão, enriquecimento.
-- **Fase 2 — parcial:** runner diário com isolamento de falhas, quality checks,
-  aliases de merge, geocoding via Nominatim (cache + rate limit 1 req/s).
-  Falta: Meilisearch, conector Ativo.com, incremental por hash (pular
-  transform quando o payload bruto não mudou), dashboard de saúde, suporte a
-  eventos internacionais (há corrida no Chile com "UF" inválida).
+- **Fase 2 — feita:** runner diário com isolamento de falhas, quality checks,
+  aliases de merge, geocoding (Nominatim), incremental por hash, suporte a
+  eventos internacionais (country ISO-2), conector Ativo.com, persistência de
+  organizadoras e índice de busca facetada (Meilisearch).
+  Falta: dashboard de saúde, orquestrador (Prefect/Dagster) quando o número de
+  fontes justificar.
 - **Fase 3:** notificações de mudança (preço/status), parcerias com feed oficial.
