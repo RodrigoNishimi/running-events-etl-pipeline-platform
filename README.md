@@ -76,6 +76,8 @@ python -m corridas_etl.pipeline.enrich --step ticketsports-distances --limit 10
 python -m corridas_etl.pipeline.enrich --step geocode                  # lat/long
 python -m corridas_etl.serving.search                                  # reindexa busca
 python -m corridas_etl.serving.search --dry-run --future-only          # docs sem servidor
+python -m corridas_etl.pipeline.notify                                 # feed de mudanças
+python -m corridas_etl.pipeline.notify --json --mark-sent              # app consome + despacha
 python -m corridas_etl.pipeline.quality                                # saúde
 ```
 
@@ -148,8 +150,9 @@ python -m corridas_etl.serving.search --future-only
 ```
 
 Facetas expostas ao app: `state`, `city`, `country`, `distances_km`, `month`,
-`year`, `registration_status`, `sources` e `_geo` (para "corridas perto de mim").
-Buscável por nome/cidade/organizadora. Exemplos (cliente `meilisearch`):
+`year`, `registration_status`, `sources`, `price`/`has_price` e `_geo` (para
+"corridas perto de mim"). Ordenável por `start_timestamp` e `price`. Buscável
+por nome/cidade/organizadora. Exemplos (cliente `meilisearch`):
 
 ```python
 idx.search("maratona", {"filter": ["state = SP", "distances_km = 42.195"],
@@ -162,6 +165,32 @@ idx.search("", {"facets": ["state", "month_name"]})                 # distribui�
 Verificado end-to-end contra os 796 eventos futuros: busca textual, filtros
 facetados, distribuição e geo-radius funcionando.
 
+## Notificações de mudança (preço/status)
+
+O pipeline **detecta e registra** mudanças de preço e status de inscrição num
+outbox (`event_change`), alimentado por um trigger `AFTER UPDATE` no `event` —
+qualquer caminho de escrita (upsert, merge) é capturado. A entrega ao usuário
+(e-mail/push) é do serviço de notificação do app, que consome o feed:
+
+```bash
+python -m corridas_etl.pipeline.notify              # feed legível
+python -m corridas_etl.pipeline.notify --json       # estruturado (p/ o app)
+python -m corridas_etl.pipeline.notify --mark-sent  # marca despachado (não reenvia)
+```
+
+Mensagens prontas: "Inscrições abriram para X", "Y esgotou", "Preço de Z caiu
+de R$A para R$B". Detalhes de design:
+- **Preço por fonte**: cada `source_record` guarda seu preço; `event.price` é
+  derivado como o **menor** entre as fontes — determinístico, então rodadas
+  repetidas não geram mudanças espúrias (evita "piscar" quando o mesmo evento
+  tem vários produtos/fontes com preços diferentes). Só uma mudança real do
+  mínimo entra no feed.
+- **Sem ruído inicial**: mudança de preço só é registrada quando havia preço
+  antes (null → X é população, não notificação).
+- **Status sem flapping**: `unknown` nunca sobrescreve um status conhecido.
+- Preço capturado de Iguana (variantes) e Running Land (preço/promoção);
+  buscável no índice (`price`, `has_price`, ordenável por `price`).
+
 ## Roadmap
 
 - **Fase 0 — feita:** schema canônico, upsert idempotente, raw storage, 1ª fonte.
@@ -170,6 +199,7 @@ facetados, distribuição e geo-radius funcionando.
   aliases de merge, geocoding (Nominatim), incremental por hash, suporte a
   eventos internacionais (country ISO-2), conector Ativo.com, persistência de
   organizadoras e índice de busca facetada (Meilisearch).
-  Falta: dashboard de saúde, orquestrador (Prefect/Dagster) quando o número de
-  fontes justificar.
-- **Fase 3:** notificações de mudança (preço/status), parcerias com feed oficial.
+- **Fase 3 — parcial:** notificações de mudança de preço/status (outbox
+  `event_change` via trigger + feed `pipeline.notify`).
+  Falta: parcerias com feed oficial, conector Live!Run, dashboard de saúde,
+  orquestrador (Prefect/Dagster) quando o número de fontes justificar.
