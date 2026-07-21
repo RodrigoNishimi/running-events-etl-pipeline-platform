@@ -16,7 +16,8 @@ Fontes  →  [EXTRACT]   →  Bronze/Raw   →  [TRANSFORM]  →  Silver        
   re-crawlear.
 - **Silver**: registro parseado e normalizado *por fonte* (`SourceEventRecord`).
 - **Gold**: evento canônico deduplicado (`CanonicalEvent`), gravado no Postgres.
-- **Serving**: Postgres (verdade); Meilisearch (busca facetada) planejado.
+- **Serving**: Postgres — fonte da verdade e também a busca facetada do app
+  (pg_trgm/unaccent/PostGIS, ver `sql/008_search.sql`).
 
 ## Estrutura
 
@@ -26,6 +27,9 @@ sql/002_postgis.sql             upgrade geoespacial opcional (PostGIS)
 sql/003_dedup.sql               fila de revisão do entity resolution
 sql/004_alias.sql               aliases de merge (chave absorvida → sobrevivente)
 sql/005_geocode.sql             cache de geocoding (Nominatim)
+sql/006_country.sql             eventos internacionais (country ISO-2)
+sql/007_changes.sql             outbox de mudanças de preço/status (trigger)
+sql/008_search.sql              busca textual (pg_trgm + unaccent + índice GIN)
 src/corridas_etl/
   config.py                     configuração via variáveis de ambiente
   models.py                     schema canônico (Pydantic)
@@ -57,6 +61,7 @@ cp .env.example .env                # ajuste DATABASE_URL
 
 # 4. Schema
 psql "$DATABASE_URL" -f sql/001_schema.sql -f sql/003_dedup.sql
+psql "$DATABASE_URL" -f sql/008_search.sql   # busca do app (pg_trgm + unaccent)
 # opcional, se o servidor tiver PostGIS: -f sql/002_postgis.sql
 
 # 5. Pipeline completo (ou etapas individuais, abaixo)
@@ -74,8 +79,6 @@ python -m corridas_etl.pipeline.dedup --resolve 3 merge                # decisã
 python -m corridas_etl.pipeline.enrich --step iguana-dates             # lacunas
 python -m corridas_etl.pipeline.enrich --step ticketsports-distances --limit 10
 python -m corridas_etl.pipeline.enrich --step geocode                  # lat/long
-python -m corridas_etl.serving.search                                  # reindexa busca
-python -m corridas_etl.serving.search --dry-run --future-only          # docs sem servidor
 python -m corridas_etl.pipeline.notify                                 # feed de mudanças
 python -m corridas_etl.pipeline.notify --json --mark-sent              # app consome + despacha
 python -m corridas_etl.pipeline.quality                                # saúde
@@ -138,32 +141,27 @@ rotear o upsert para o sobrevivente, então a recarga da fonte não recria o
 duplicado. O upsert usa COALESCE — fontes preenchem lacunas, nunca apagam dado
 enriquecido.
 
-## Busca facetada (Meilisearch)
+## Busca facetada (direto no Postgres)
 
-A camada de serving indexa os eventos no Meilisearch (`serving/search.py`).
-O Postgres continua sendo a verdade; o índice é derivado e reconstruível.
+A busca do app roda direto nas tabelas deste schema — não há índice externo
+nem etapa de reindexação: o que o pipeline grava já é pesquisável. O
+`sql/008_search.sql` prepara o banco:
 
-```bash
-docker compose up -d search           # sobe o Meilisearch (porta 7700)
-export MEILI_MASTER_KEY=dev_master_key
-python -m corridas_etl.serving.search --future-only
-```
+- **`pg_trgm`** — matching por trigramas: tolerância a erro de digitação
+  (`word_similarity`) e substring match indexável (`LIKE`);
+- **`unaccent`** (via wrapper imutável `f_unaccent`) — "sao paulo" encontra
+  "São Paulo";
+- **índice GIN** (`event_search_trgm_idx`, `gin_trgm_ops`) sobre a expressão
+  nome + cidade + UF normalizada — a query do app usa a mesma expressão para
+  o planner aproveitá-lo;
+- geo ("perto de mim") é haversine em SQL puro sobre `latitude`/`longitude`
+  — funciona em qualquer Postgres, sem exigir PostGIS (o
+  `sql/002_postgis.sql` segue opcional).
 
-Facetas expostas ao app: `state`, `city`, `country`, `distances_km`, `month`,
-`year`, `registration_status`, `sources`, `price`/`has_price` e `_geo` (para
-"corridas perto de mim"). Ordenável por `start_timestamp` e `price`. Buscável
-por nome/cidade/organizadora. Exemplos (cliente `meilisearch`):
-
-```python
-idx.search("maratona", {"filter": ["state = SP", "distances_km = 42.195"],
-                        "sort": ["start_timestamp:asc"]})
-idx.search("", {"filter": ["_geoRadius(-23.55, -46.63, 50000)"],   # raio 50km
-               "sort": ["_geoPoint(-23.55,-46.63):asc"]})
-idx.search("", {"facets": ["state", "month_name"]})                 # distribuição
-```
-
-Verificado end-to-end contra os 796 eventos futuros: busca textual, filtros
-facetados, distribuição e geo-radius funcionando.
+Filtros/facetas ficam em SQL comum (`WHERE` + `GROUP BY`) na query do app
+(`RunnersHub/src/lib/search.ts`): estado, cidade, distâncias, mês,
+status de inscrição, preço. Eventos passados ficam fora da busca via
+`start_at >= now()` — sem necessidade do antigo `--future-only`.
 
 ## Notificações de mudança (preço/status)
 
@@ -189,7 +187,7 @@ de R$A para R$B". Detalhes de design:
   antes (null → X é população, não notificação).
 - **Status sem flapping**: `unknown` nunca sobrescreve um status conhecido.
 - Preço capturado de Iguana (variantes) e Running Land (preço/promoção);
-  buscável no índice (`price`, `has_price`, ordenável por `price`).
+  filtrável e ordenável na busca do app (`price`, `has_price`).
 
 ## Roadmap
 
@@ -198,7 +196,8 @@ de R$A para R$B". Detalhes de design:
 - **Fase 2 — feita:** runner diário com isolamento de falhas, quality checks,
   aliases de merge, geocoding (Nominatim), incremental por hash, suporte a
   eventos internacionais (country ISO-2), conector Ativo.com, persistência de
-  organizadoras e índice de busca facetada (Meilisearch).
+  organizadoras e busca facetada (hoje direto no Postgres — `sql/008_search.sql`;
+  o índice Meilisearch original foi aposentado).
 - **Fase 3 — parcial:** notificações de mudança de preço/status (outbox
   `event_change` via trigger + feed `pipeline.notify`).
   Falta: parcerias com feed oficial, conector Live!Run, dashboard de saúde,
