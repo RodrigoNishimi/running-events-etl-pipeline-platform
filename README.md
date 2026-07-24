@@ -31,6 +31,7 @@ sql/006_country.sql             eventos internacionais (country ISO-2)
 sql/007_changes.sql             outbox de mudanças de preço/status (trigger)
 sql/008_search.sql              busca textual (pg_trgm + unaccent + índice GIN)
 sql/009_location_precision.sql  precisão da localização (exact vs centro da cidade)
+sql/010_parse_version.sql       versão do parser no gate incremental (reprocesso ao mudar parse)
 src/corridas_etl/
   config.py                     configuração via variáveis de ambiente
   models.py                     schema canônico (Pydantic)
